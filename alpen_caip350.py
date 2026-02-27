@@ -24,6 +24,7 @@ EVM_ADDRESS_LENGTH = 20  # bytes
 
 ALPEN_TESTNET_CHAIN_ID = 8150
 ALPEN_MAINNET_CHAIN_ID = 815
+ALPEN_COINBASE = "0x5400000000000000000000000000000000000011"  # standard Alpen coinbase
 
 
 # ── Core functions ───────────────────────────────────────────────────────────
@@ -177,7 +178,7 @@ def main():
     parser.add_argument(
         "--address",
         type=str,
-        help="EVM address (0x-prefixed, 40 hex chars)",
+        help=f"EVM address (0x-prefixed, 40 hex chars; default: Alpen coinbase)",
     )
     parser.add_argument(
         "--chain-id",
@@ -198,7 +199,7 @@ def main():
         sys.exit(0 if ok else 1)
 
     if not args.address:
-        parser.error("--address is required (or use --test)")
+        args.address = ALPEN_COINBASE
 
     address_bytes = validate_address(args.address)
     erc7930 = encode_erc7930(args.chain_id, address_bytes)
