@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Alpen EVM Address → CAIP-350 / ERC-7930 Interoperable Address Encoder
+Encoder: Alpen EVM Address → CAIP-350 / ERC-7930 Interoperable Address
 
 Encodes a standard 0x EVM address into the ERC-7930 binary format
-using the eip155 CAIP-350 profile.
+using the eip155 CAIP-350 profile. See alpen_from_caip350.py for the decoder.
 
 Binary layout (ERC-7930):
   Version (2B) | ChainType (2B) | ChainRefLen (1B) | ChainRef (var) | AddrLen (1B) | Address (var)
