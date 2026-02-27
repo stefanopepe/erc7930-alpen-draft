@@ -1,12 +1,17 @@
 # erc7930-alpen
 
-Encode a standard EVM address (`0x...`) into an [ERC-7930](https://ercs.ethereum.org/ERCS/erc-7930) **interoperable address** for the [Alpen](https://alpenlabs.io) chain, following the [CAIP-350](https://chainagnostic.org/CAIPs/caip-350) binary serialization standard.
+Encode and decode [ERC-7930](https://ercs.ethereum.org/ERCS/erc-7930) **interoperable addresses** for the [Alpen](https://alpenlabs.io) chain, following the [CAIP-350](https://chainagnostic.org/CAIPs/caip-350) binary serialization standard.
+
+| Script | Direction |
+|--------|-----------|
+| `alpen_to_caip350.py` | EVM address **&rarr;** ERC-7930 envelope |
+| `alpen_from_caip350.py` | ERC-7930 envelope **&rarr;** EVM address |
 
 ## Why?
 
 Different blockchains use different address formats. ERC-7930 defines a single binary envelope that wraps any blockchain address together with its chain identity, so wallets, bridges, and dApps can pass addresses around without ambiguity.
 
-This script produces that envelope for Alpen, an EVM-compatible chain.
+These scripts produce and parse that envelope for Alpen, an EVM-compatible chain.
 
 ## Alpen Chain IDs
 
@@ -46,18 +51,23 @@ For Alpen testnet (chain 8150) with address `0xd8dA6BF26964aF9D7eEd9e03E53415D37
 
 Python 3.7+, no dependencies.
 
+### Encode (EVM address &rarr; ERC-7930)
+
 ```bash
-# Encode an address on Alpen testnet (default chain-id = 8150)
-python3 alpen_caip350.py --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
+# Encode the default Alpen coinbase on testnet (chain 8150)
+python3 alpen_to_caip350.py
+
+# Encode a specific address
+python3 alpen_to_caip350.py --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
 
 # Encode on Alpen mainnet
-python3 alpen_caip350.py --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 --chain-id 815
+python3 alpen_to_caip350.py --address 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 --chain-id 815
 
-# Run built-in test vectors
-python3 alpen_caip350.py --test
+# Run encoder test vectors
+python3 alpen_to_caip350.py --test
 ```
 
-### Example output
+Example output:
 
 ```
 CAIP-2  : eip155:8150
@@ -72,6 +82,34 @@ Field breakdown:
   ChainReference   : 0x1fd6  (chain ID 8150)
   AddressLength    : 0x14  (20 bytes)
   Address          : 0xd8da6bf26964af9d7eed9e03e53415d37aa96045
+```
+
+### Decode (ERC-7930 &rarr; EVM address)
+
+```bash
+# Decode an ERC-7930 hex blob
+python3 alpen_from_caip350.py --erc7930 0x00010000021fd6145400000000000000000000000000000000000011
+
+# Strict mode — reject non-Alpen chain IDs
+python3 alpen_from_caip350.py --erc7930 0x00010000010114d8da6bf26964af9d7eed9e03e53415d37aa96045 --strict
+
+# Run decoder test vectors
+python3 alpen_from_caip350.py --test
+```
+
+Example output:
+
+```
+CAIP-2  : eip155:8150
+CAIP-10 : eip155:8150:0x5400000000000000000000000000000000000011
+Chain ID         : 8150
+EVM address      : 0x5400000000000000000000000000000000000011
+
+Field breakdown:
+  Version          : 0x0001
+  ChainType        : 0x0000  (eip155)
+  Chain ID         : 8150
+  Address          : 0x5400000000000000000000000000000000000011
 ```
 
 ## Golden test vectors
