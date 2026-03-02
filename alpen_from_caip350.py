@@ -2,12 +2,15 @@
 """
 Decoder: CAIP-350 / ERC-7930 Interoperable Address → Alpen EVM Address
 
-Parses an ERC-7930 binary envelope and extracts the chain ID and plain
-EVM address. See alpen_to_caip350.py for the encoder.
+Parses an ERC-7930 binary envelope and extracts the chain identity and
+plain EVM address. Supports two namespaces:
+  - eip155  (ChainType 0x0000) — chain ref = numeric chain ID
+  - strata  (ChainType 0xFFFF) — chain ref = 32-byte genesis block hash
+
+See alpen_to_caip350.py for the encoder.
 
 Binary layout (ERC-7930):
   Version (2B) | ChainType (2B) | ChainRefLen (1B) | ChainRef (var) | AddrLen (1B) | Address (var)
-  0x0001       | 0x0000         | N                | BE(chainId)    | 0x14         | 20 raw bytes
 
 No external dependencies — stdlib only.
 """
@@ -20,10 +23,17 @@ import sys
 
 ERC7930_VERSION = 0x0001
 EIP155_CHAIN_TYPE = 0x0000
+STRATA_CHAIN_TYPE = 0xFFFF  # placeholder until CASA assigns an official value
 
 ALPEN_TESTNET_CHAIN_ID = 8150
 ALPEN_MAINNET_CHAIN_ID = 815
 ALPEN_CHAIN_IDS = {ALPEN_TESTNET_CHAIN_ID, ALPEN_MAINNET_CHAIN_ID}
+ALPEN_TESTNET_GENESIS = "0x0102272379ba01273f82eb5ad1b00d2616458ad308efdfe4a6cc3012c9d3447a"
+
+CHAIN_TYPE_NAMES = {
+    EIP155_CHAIN_TYPE: "eip155",
+    STRATA_CHAIN_TYPE: "strata",
+}
 
 
 # ── Core functions ───────────────────────────────────────────────────────────
@@ -36,12 +46,18 @@ def decode_erc7930(data: bytes) -> dict:
 
     Returns:
         Dictionary with keys:
-            version    (int)  — envelope version
-            chain_type (int)  — namespace identifier
-            chain_id   (int)  — decoded chain ID
-            address    (str)  — EVM address as 0x-prefixed lowercase hex
-            caip2      (str)  — CAIP-2 chain identifier
-            caip10     (str)  — CAIP-10 account identifier
+            version      (int)  — envelope version
+            chain_type   (int)  — namespace identifier
+            namespace    (str)  — "eip155" or "strata"
+            address      (str)  — EVM address as 0x-prefixed lowercase hex
+            caip2        (str)  — CAIP-2 chain identifier
+            caip10       (str)  — CAIP-10 account identifier
+
+        For eip155:
+            chain_id     (int)  — decoded chain ID
+
+        For strata:
+            genesis_hash (str)  — full genesis hash as 0x-prefixed hex
 
     Raises:
         ValueError on malformed input.
@@ -64,10 +80,12 @@ def decode_erc7930(data: bytes) -> dict:
     # ChainType (2B)
     chain_type = struct.unpack_from(">H", data, offset)[0]
     offset += 2
-    if chain_type != EIP155_CHAIN_TYPE:
+    if chain_type not in CHAIN_TYPE_NAMES:
         raise ValueError(
-            f"Unsupported chain type: 0x{chain_type:04x} (expected 0x{EIP155_CHAIN_TYPE:04x} for eip155)"
+            f"Unsupported chain type: 0x{chain_type:04x} "
+            f"(supported: {', '.join(f'0x{k:04x} ({v})' for k, v in CHAIN_TYPE_NAMES.items())})"
         )
+    namespace = CHAIN_TYPE_NAMES[chain_type]
 
     # ChainReferenceLength (1B)
     chain_ref_len = data[offset]
@@ -79,10 +97,9 @@ def decode_erc7930(data: bytes) -> dict:
             f"{len(data) - offset} bytes remain"
         )
 
-    # ChainReference (var) — big-endian unsigned int
+    # ChainReference (var)
     chain_ref_bytes = data[offset : offset + chain_ref_len]
     offset += chain_ref_len
-    chain_id = int.from_bytes(chain_ref_bytes, byteorder="big") if chain_ref_len > 0 else 0
 
     # AddressLength (1B)
     if offset >= len(data):
@@ -98,18 +115,30 @@ def decode_erc7930(data: bytes) -> dict:
 
     # Address (var)
     address_bytes = data[offset : offset + addr_len]
-    offset += addr_len
-
     address_hex = "0x" + address_bytes.hex()
 
-    return {
+    # Build result based on namespace
+    result = {
         "version": version,
         "chain_type": chain_type,
-        "chain_id": chain_id,
+        "namespace": namespace,
         "address": address_hex,
-        "caip2": f"eip155:{chain_id}",
-        "caip10": f"eip155:{chain_id}:{address_hex}",
     }
+
+    if namespace == "eip155":
+        chain_id = int.from_bytes(chain_ref_bytes, byteorder="big") if chain_ref_len > 0 else 0
+        result["chain_id"] = chain_id
+        result["caip2"] = f"eip155:{chain_id}"
+        result["caip10"] = f"eip155:{chain_id}:{address_hex}"
+    else:  # strata
+        genesis_hash = "0x" + chain_ref_bytes.hex()
+        result["genesis_hash"] = genesis_hash
+        # CAIP-2 text reference: first 32 hex chars (16 bytes) of genesis hash
+        ref_short = chain_ref_bytes.hex()[:32]
+        result["caip2"] = f"strata:{ref_short}"
+        result["caip10"] = f"strata:{ref_short}:{address_hex}"
+
+    return result
 
 
 def parse_hex_input(hex_str: str) -> bytes:
@@ -125,8 +154,8 @@ def parse_hex_input(hex_str: str) -> bytes:
 
 # ── Test vectors ─────────────────────────────────────────────────────────────
 
-# (description, erc7930_hex, expected_chain_id, expected_address)
-DECODE_TEST_VECTORS = [
+# eip155: (description, erc7930_hex, expected_chain_id, expected_address)
+EIP155_DECODE_VECTORS = [
     (
         "ERC-7930 spec — Ethereum mainnet (vitalik.eth)",
         "00010000010114d8da6bf26964af9d7eed9e03e53415d37aa96045",
@@ -134,29 +163,45 @@ DECODE_TEST_VECTORS = [
         "0xd8da6bf26964af9d7eed9e03e53415d37aa96045",
     ),
     (
-        "Alpen testnet (chain 8150)",
+        "Alpen testnet eip155 (chain 8150)",
         "00010000021fd614d8da6bf26964af9d7eed9e03e53415d37aa96045",
         8150,
         "0xd8da6bf26964af9d7eed9e03e53415d37aa96045",
     ),
     (
-        "Alpen mainnet (chain 815)",
+        "Alpen mainnet eip155 (chain 815)",
         "0001000002032f14d8da6bf26964af9d7eed9e03e53415d37aa96045",
         815,
         "0xd8da6bf26964af9d7eed9e03e53415d37aa96045",
     ),
     (
-        "Alpen testnet — coinbase address",
+        "Alpen testnet eip155 — coinbase",
         "00010000021fd6145400000000000000000000000000000000000011",
         8150,
         "0x5400000000000000000000000000000000000011",
     ),
 ]
 
+# strata: (description, erc7930_hex, expected_genesis_hash, expected_address)
+STRATA_DECODE_VECTORS = [
+    (
+        "Alpen testnet strata — coinbase",
+        "0001ffff200102272379ba01273f82eb5ad1b00d2616458ad308efdfe4a6cc3012c9d3447a145400000000000000000000000000000000000011",
+        "0x0102272379ba01273f82eb5ad1b00d2616458ad308efdfe4a6cc3012c9d3447a",
+        "0x5400000000000000000000000000000000000011",
+    ),
+    (
+        "Alpen testnet strata — vitalik address",
+        "0001ffff200102272379ba01273f82eb5ad1b00d2616458ad308efdfe4a6cc3012c9d3447a14d8da6bf26964af9d7eed9e03e53415d37aa96045",
+        "0x0102272379ba01273f82eb5ad1b00d2616458ad308efdfe4a6cc3012c9d3447a",
+        "0xd8da6bf26964af9d7eed9e03e53415d37aa96045",
+    ),
+]
+
 ERROR_TEST_VECTORS = [
     ("Too short", "000100"),
     ("Wrong version", "00020000010114d8da6bf26964af9d7eed9e03e53415d37aa96045"),
-    ("Wrong chain type", "00010001010114d8da6bf26964af9d7eed9e03e53415d37aa96045"),
+    ("Unknown chain type 0x0099", "00010099010114d8da6bf26964af9d7eed9e03e53415d37aa96045"),
     ("Truncated chain ref", "000100000201"),
     ("Truncated address", "00010000010114d8da6bf26964af9d7e"),
 ]
@@ -166,14 +211,16 @@ def run_tests() -> bool:
     """Run built-in test vectors. Returns True if all pass."""
     all_pass = True
 
-    print("Decode tests:")
-    for desc, erc7930_hex, expected_cid, expected_addr in DECODE_TEST_VECTORS:
+    # eip155 decode tests
+    print("eip155 decode tests:")
+    for desc, erc7930_hex, expected_cid, expected_addr in EIP155_DECODE_VECTORS:
         data = bytes.fromhex(erc7930_hex)
         try:
             result = decode_erc7930(data)
-            cid_ok = result["chain_id"] == expected_cid
+            cid_ok = result.get("chain_id") == expected_cid
             addr_ok = result["address"] == expected_addr
-            ok = cid_ok and addr_ok
+            ns_ok = result["namespace"] == "eip155"
+            ok = cid_ok and addr_ok and ns_ok
         except Exception as e:
             ok = False
             result = {"error": str(e)}
@@ -187,6 +234,30 @@ def run_tests() -> bool:
         else:
             print(f"         chain {result['chain_id']} -> {result['address']}")
 
+    # strata decode tests
+    print("\nstrata decode tests:")
+    for desc, erc7930_hex, expected_genesis, expected_addr in STRATA_DECODE_VECTORS:
+        data = bytes.fromhex(erc7930_hex)
+        try:
+            result = decode_erc7930(data)
+            gen_ok = result.get("genesis_hash") == expected_genesis
+            addr_ok = result["address"] == expected_addr
+            ns_ok = result["namespace"] == "strata"
+            ok = gen_ok and addr_ok and ns_ok
+        except Exception as e:
+            ok = False
+            result = {"error": str(e)}
+
+        status = "PASS" if ok else "FAIL"
+        print(f"  [{status}] {desc}")
+        if not ok:
+            print(f"         expected genesis={expected_genesis}, address={expected_addr}")
+            print(f"         got: {result}")
+            all_pass = False
+        else:
+            print(f"         {result['caip2']} -> {result['address']}")
+
+    # error handling tests
     print("\nError handling tests:")
     for desc, bad_hex in ERROR_TEST_VECTORS:
         data = bytes.fromhex(bad_hex)
@@ -214,7 +285,7 @@ def main():
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Only accept Alpen chain IDs (8150, 815)",
+        help="Only accept known Alpen chain identities",
     )
     parser.add_argument(
         "--test",
@@ -234,23 +305,39 @@ def main():
     data = parse_hex_input(args.erc7930)
     result = decode_erc7930(data)
 
-    if args.strict and result["chain_id"] not in ALPEN_CHAIN_IDS:
-        print(
-            f"Error: chain ID {result['chain_id']} is not an Alpen chain "
-            f"(expected {ALPEN_TESTNET_CHAIN_ID} or {ALPEN_MAINNET_CHAIN_ID})",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    if args.strict:
+        if result["namespace"] == "eip155" and result["chain_id"] not in ALPEN_CHAIN_IDS:
+            print(
+                f"Error: chain ID {result['chain_id']} is not a known Alpen chain",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if result["namespace"] == "strata" and result.get("genesis_hash") != ALPEN_TESTNET_GENESIS:
+            print(
+                f"Error: genesis hash {result.get('genesis_hash')} does not match "
+                f"known Alpen testnet genesis",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
-    print(f"CAIP-2  : {result['caip2']}")
-    print(f"CAIP-10 : {result['caip10']}")
-    print(f"Chain ID         : {result['chain_id']}")
+    print(f"Namespace : {result['namespace']}")
+    print(f"CAIP-2    : {result['caip2']}")
+    print(f"CAIP-10   : {result['caip10']}")
+
+    if result["namespace"] == "eip155":
+        print(f"Chain ID         : {result['chain_id']}")
+    else:
+        print(f"Genesis hash     : {result['genesis_hash']}")
+
     print(f"EVM address      : {result['address']}")
     print()
     print("Field breakdown:")
     print(f"  Version          : 0x{result['version']:04x}")
-    print(f"  ChainType        : 0x{result['chain_type']:04x}  (eip155)")
-    print(f"  Chain ID         : {result['chain_id']}")
+    print(f"  ChainType        : 0x{result['chain_type']:04x}  ({result['namespace']})")
+    if result["namespace"] == "eip155":
+        print(f"  Chain ID         : {result['chain_id']}")
+    else:
+        print(f"  Genesis hash     : {result['genesis_hash']}")
     print(f"  Address          : {result['address']}")
 
 

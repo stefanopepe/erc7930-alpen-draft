@@ -2,12 +2,15 @@
 """
 Encoder: Alpen EVM Address → CAIP-350 / ERC-7930 Interoperable Address
 
-Encodes a standard 0x EVM address into the ERC-7930 binary format
-using the eip155 CAIP-350 profile. See alpen_from_caip350.py for the decoder.
+Encodes a standard 0x EVM address into the ERC-7930 binary format.
+Supports two namespaces:
+  - eip155  (ChainType 0x0000) — chain ref = numeric chain ID
+  - strata  (ChainType 0xFFFF) — chain ref = 32-byte genesis block hash
+
+See alpen_from_caip350.py for the decoder.
 
 Binary layout (ERC-7930):
   Version (2B) | ChainType (2B) | ChainRefLen (1B) | ChainRef (var) | AddrLen (1B) | Address (var)
-  0x0001       | 0x0000         | N                | BE(chainId)    | 0x14         | 20 raw bytes
 
 No external dependencies — stdlib only.
 """
@@ -20,11 +23,14 @@ import sys
 
 ERC7930_VERSION = 0x0001
 EIP155_CHAIN_TYPE = 0x0000
+STRATA_CHAIN_TYPE = 0xFFFF  # placeholder until CASA assigns an official value
 EVM_ADDRESS_LENGTH = 20  # bytes
+GENESIS_HASH_LENGTH = 32  # bytes
 
 ALPEN_TESTNET_CHAIN_ID = 8150
 ALPEN_MAINNET_CHAIN_ID = 815
 ALPEN_COINBASE = "0x5400000000000000000000000000000000000011"  # standard Alpen coinbase
+ALPEN_TESTNET_GENESIS = "0x0102272379ba01273f82eb5ad1b00d2616458ad308efdfe4a6cc3012c9d3447a"
 
 
 # ── Core functions ───────────────────────────────────────────────────────────
@@ -45,7 +51,6 @@ def chain_id_to_ref_bytes(chain_id: int) -> bytes:
     """
     if chain_id <= 0:
         raise ValueError(f"chain_id must be a positive integer, got {chain_id}")
-    # int.to_bytes with minimal length
     byte_length = (chain_id.bit_length() + 7) // 8
     return chain_id.to_bytes(byte_length, byteorder="big")
 
@@ -65,42 +70,91 @@ def validate_address(address: str) -> bytes:
         raise ValueError(f"Address contains invalid hex characters: {address}")
 
 
-def encode_erc7930(chain_id: int, address_bytes: bytes) -> bytes:
+def validate_genesis_hash(genesis: str) -> bytes:
+    """Parse a 0x-prefixed 64-hex-char genesis block hash and return raw 32 bytes."""
+    if not genesis.startswith("0x") and not genesis.startswith("0X"):
+        raise ValueError(f"Genesis hash must start with 0x, got: {genesis[:6]}...")
+    hex_part = genesis[2:]
+    if len(hex_part) != GENESIS_HASH_LENGTH * 2:
+        raise ValueError(
+            f"Genesis hash must be {GENESIS_HASH_LENGTH * 2} hex chars, got {len(hex_part)}"
+        )
+    try:
+        return bytes.fromhex(hex_part)
+    except ValueError:
+        raise ValueError(f"Genesis hash contains invalid hex characters: {genesis}")
+
+
+def encode_erc7930(address_bytes: bytes, *, namespace: str = "eip155",
+                   chain_id: int = 0, genesis_hash_bytes: bytes = b"") -> bytes:
     """Assemble a full ERC-7930 interoperable address envelope.
 
-    Returns the raw binary (use .hex() for display).
+    For eip155:  pass chain_id (int).
+    For strata:  pass genesis_hash_bytes (32 bytes).
     """
-    chain_ref = chain_id_to_ref_bytes(chain_id)
-    addr_len = len(address_bytes)
+    if namespace == "eip155":
+        chain_type = EIP155_CHAIN_TYPE
+        chain_ref = chain_id_to_ref_bytes(chain_id)
+    elif namespace == "strata":
+        chain_type = STRATA_CHAIN_TYPE
+        chain_ref = genesis_hash_bytes
+    else:
+        raise ValueError(f"Unsupported namespace: {namespace}")
 
-    # Version (2B, big-endian) + ChainType (2B, big-endian)
-    header = struct.pack(">HH", ERC7930_VERSION, EIP155_CHAIN_TYPE)
-    # ChainReferenceLength (1B) + ChainReference (var)
+    header = struct.pack(">HH", ERC7930_VERSION, chain_type)
     chain_part = struct.pack("B", len(chain_ref)) + chain_ref
-    # AddressLength (1B) + Address (var)
-    addr_part = struct.pack("B", addr_len) + address_bytes
+    addr_part = struct.pack("B", len(address_bytes)) + address_bytes
 
     return header + chain_part + addr_part
 
 
+# ── Formatting helpers ───────────────────────────────────────────────────────
+
 def format_caip2(chain_id: int) -> str:
-    """CAIP-2 chain identifier, e.g. 'eip155:8150'."""
+    """CAIP-2 chain identifier for eip155, e.g. 'eip155:8150'."""
     return f"eip155:{chain_id}"
 
 
 def format_caip10(chain_id: int, address: str) -> str:
-    """CAIP-10 account identifier, e.g. 'eip155:8150:0xd8dA...'."""
+    """CAIP-10 account identifier for eip155, e.g. 'eip155:8150:0xd8dA...'."""
     return f"eip155:{chain_id}:{address}"
 
 
-def pretty_breakdown(chain_id: int, address_bytes: bytes) -> str:
+def format_caip2_strata(genesis_hash_hex: str) -> str:
+    """CAIP-2 chain identifier for strata.
+
+    Uses the first 32 hex chars (16 bytes) of the genesis hash to fit
+    the CAIP-2 reference length limit of 32 characters.
+    """
+    ref = genesis_hash_hex.lower().removeprefix("0x")[:32]
+    return f"strata:{ref}"
+
+
+def format_caip10_strata(genesis_hash_hex: str, address: str) -> str:
+    """CAIP-10 account identifier for strata."""
+    ref = genesis_hash_hex.lower().removeprefix("0x")[:32]
+    return f"strata:{ref}:{address}"
+
+
+def pretty_breakdown(address_bytes: bytes, *, namespace: str = "eip155",
+                     chain_id: int = 0, genesis_hash_bytes: bytes = b"") -> str:
     """Return a human-readable field-by-field breakdown of the ERC-7930 encoding."""
-    chain_ref = chain_id_to_ref_bytes(chain_id)
+    if namespace == "eip155":
+        chain_type = EIP155_CHAIN_TYPE
+        chain_ref = chain_id_to_ref_bytes(chain_id)
+        ref_label = f"chain ID {chain_id}"
+        ns_label = "eip155"
+    else:
+        chain_type = STRATA_CHAIN_TYPE
+        chain_ref = genesis_hash_bytes
+        ref_label = "genesis hash"
+        ns_label = "strata"
+
     lines = [
         f"  Version          : 0x{ERC7930_VERSION:04x}",
-        f"  ChainType        : 0x{EIP155_CHAIN_TYPE:04x}  (eip155)",
+        f"  ChainType        : 0x{chain_type:04x}  ({ns_label})",
         f"  ChainRefLength   : 0x{len(chain_ref):02x}  ({len(chain_ref)} byte{'s' if len(chain_ref) != 1 else ''})",
-        f"  ChainReference   : 0x{chain_ref.hex()}  (chain ID {chain_id})",
+        f"  ChainReference   : 0x{chain_ref.hex()}  ({ref_label})",
         f"  AddressLength    : 0x{len(address_bytes):02x}  ({len(address_bytes)} bytes)",
         f"  Address          : 0x{address_bytes.hex()}",
     ]
@@ -109,8 +163,8 @@ def pretty_breakdown(chain_id: int, address_bytes: bytes) -> str:
 
 # ── Test vectors ─────────────────────────────────────────────────────────────
 
+# eip155 vectors: (description, chain_id, address_hex, expected_erc7930_hex)
 SPEC_TEST_VECTORS = [
-    # (description, chain_id, address_hex, expected_erc7930_hex)
     (
         "ERC-7930 spec — Ethereum mainnet (vitalik.eth)",
         1,
@@ -119,18 +173,34 @@ SPEC_TEST_VECTORS = [
     ),
 ]
 
-ALPEN_TEST_VECTORS = [
+ALPEN_EIP155_VECTORS = [
     (
-        "Alpen testnet (chain 8150)",
+        "Alpen testnet eip155 (chain 8150)",
         ALPEN_TESTNET_CHAIN_ID,
         "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
         "00010000021fd614d8da6bf26964af9d7eed9e03e53415d37aa96045",
     ),
     (
-        "Alpen mainnet (chain 815)",
+        "Alpen mainnet eip155 (chain 815)",
         ALPEN_MAINNET_CHAIN_ID,
         "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
         "0001000002032f14d8da6bf26964af9d7eed9e03e53415d37aa96045",
+    ),
+]
+
+# strata vectors: (description, genesis_hash_hex, address_hex, expected_erc7930_hex)
+ALPEN_STRATA_VECTORS = [
+    (
+        "Alpen testnet strata — coinbase",
+        ALPEN_TESTNET_GENESIS,
+        ALPEN_COINBASE,
+        "0001ffff200102272379ba01273f82eb5ad1b00d2616458ad308efdfe4a6cc3012c9d3447a145400000000000000000000000000000000000011",
+    ),
+    (
+        "Alpen testnet strata — vitalik address",
+        ALPEN_TESTNET_GENESIS,
+        "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+        "0001ffff200102272379ba01273f82eb5ad1b00d2616458ad308efdfe4a6cc3012c9d3447a14d8da6bf26964af9d7eed9e03e53415d37aa96045",
     ),
 ]
 
@@ -138,25 +208,25 @@ ALPEN_TEST_VECTORS = [
 def run_tests() -> bool:
     """Run built-in test vectors. Returns True if all pass."""
     all_pass = True
-    all_vectors = SPEC_TEST_VECTORS + ALPEN_TEST_VECTORS
 
-    for desc, chain_id, addr_hex, expected_hex in all_vectors:
-        # Normalise expected (strip spaces for readability)
+    # eip155 encode tests
+    print("eip155 encode tests:")
+    for desc, chain_id, addr_hex, expected_hex in SPEC_TEST_VECTORS + ALPEN_EIP155_VECTORS:
         expected = expected_hex.replace(" ", "").lower()
         addr_bytes = validate_address(addr_hex)
-        result = encode_erc7930(chain_id, addr_bytes).hex()
+        result = encode_erc7930(addr_bytes, namespace="eip155", chain_id=chain_id).hex()
 
         ok = result == expected
         status = "PASS" if ok else "FAIL"
-        print(f"[{status}] {desc}")
+        print(f"  [{status}] {desc}")
         if not ok:
-            print(f"       expected: 0x{expected}")
-            print(f"       got:      0x{result}")
+            print(f"         expected: 0x{expected}")
+            print(f"         got:      0x{result}")
             all_pass = False
         else:
-            print(f"       0x{result}")
+            print(f"         0x{result}")
 
-    # Also print chain reference byte checks
+    # chain reference byte checks
     print("\nChain reference byte encoding:")
     for cid, expected in [(1, "01"), (10, "0a"), (815, "032f"), (8150, "1fd6"), (11155111, "aa36a7")]:
         ref = chain_id_to_ref_bytes(cid).hex()
@@ -165,6 +235,24 @@ def run_tests() -> bool:
         print(f"  [{status}] chain {cid:>10} -> 0x{ref}  (expected 0x{expected})")
         if not ok:
             all_pass = False
+
+    # strata encode tests
+    print("\nstrata encode tests:")
+    for desc, genesis_hex, addr_hex, expected_hex in ALPEN_STRATA_VECTORS:
+        expected = expected_hex.replace(" ", "").lower()
+        addr_bytes = validate_address(addr_hex)
+        genesis_bytes = validate_genesis_hash(genesis_hex)
+        result = encode_erc7930(addr_bytes, namespace="strata", genesis_hash_bytes=genesis_bytes).hex()
+
+        ok = result == expected
+        status = "PASS" if ok else "FAIL"
+        print(f"  [{status}] {desc}")
+        if not ok:
+            print(f"         expected: 0x{expected}")
+            print(f"         got:      0x{result}")
+            all_pass = False
+        else:
+            print(f"         0x{result}")
 
     return all_pass
 
@@ -176,15 +264,27 @@ def main():
         description="Encode an EVM address as a CAIP-350 / ERC-7930 interoperable address."
     )
     parser.add_argument(
+        "--namespace",
+        choices=["eip155", "strata"],
+        default="eip155",
+        help="CAIP-2 namespace (default: eip155)",
+    )
+    parser.add_argument(
         "--address",
         type=str,
-        help=f"EVM address (0x-prefixed, 40 hex chars; default: Alpen coinbase)",
+        help="EVM address (0x-prefixed, 40 hex chars; default: Alpen coinbase)",
     )
     parser.add_argument(
         "--chain-id",
         type=int,
         default=ALPEN_TESTNET_CHAIN_ID,
-        help=f"EIP-155 chain ID (default: {ALPEN_TESTNET_CHAIN_ID} Alpen testnet)",
+        help=f"EIP-155 chain ID — eip155 only (default: {ALPEN_TESTNET_CHAIN_ID})",
+    )
+    parser.add_argument(
+        "--genesis-hash",
+        type=str,
+        default=ALPEN_TESTNET_GENESIS,
+        help="Genesis block hash (0x, 64 hex chars) — strata only (default: Alpen testnet)",
     )
     parser.add_argument(
         "--test",
@@ -202,15 +302,26 @@ def main():
         args.address = ALPEN_COINBASE
 
     address_bytes = validate_address(args.address)
-    erc7930 = encode_erc7930(args.chain_id, address_bytes)
 
-    print(f"CAIP-2  : {format_caip2(args.chain_id)}")
-    print(f"CAIP-10 : {format_caip10(args.chain_id, args.address)}")
-    print(f"Chain reference bytes : 0x{chain_id_to_ref_bytes(args.chain_id).hex()}")
-    print(f"ERC-7930 (hex)        : 0x{erc7930.hex()}")
-    print()
-    print("Field breakdown:")
-    print(pretty_breakdown(args.chain_id, address_bytes))
+    if args.namespace == "eip155":
+        erc7930 = encode_erc7930(address_bytes, namespace="eip155", chain_id=args.chain_id)
+        print(f"CAIP-2  : {format_caip2(args.chain_id)}")
+        print(f"CAIP-10 : {format_caip10(args.chain_id, args.address)}")
+        print(f"Chain reference bytes : 0x{chain_id_to_ref_bytes(args.chain_id).hex()}")
+        print(f"ERC-7930 (hex)        : 0x{erc7930.hex()}")
+        print()
+        print("Field breakdown:")
+        print(pretty_breakdown(address_bytes, namespace="eip155", chain_id=args.chain_id))
+    else:
+        genesis_bytes = validate_genesis_hash(args.genesis_hash)
+        erc7930 = encode_erc7930(address_bytes, namespace="strata", genesis_hash_bytes=genesis_bytes)
+        print(f"CAIP-2  : {format_caip2_strata(args.genesis_hash)}")
+        print(f"CAIP-10 : {format_caip10_strata(args.genesis_hash, args.address)}")
+        print(f"Genesis hash          : {args.genesis_hash}")
+        print(f"ERC-7930 (hex)        : 0x{erc7930.hex()}")
+        print()
+        print("Field breakdown:")
+        print(pretty_breakdown(address_bytes, namespace="strata", genesis_hash_bytes=genesis_bytes))
 
 
 if __name__ == "__main__":
