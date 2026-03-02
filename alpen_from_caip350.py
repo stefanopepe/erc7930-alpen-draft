@@ -29,6 +29,8 @@ ALPEN_TESTNET_CHAIN_ID = 8150
 ALPEN_MAINNET_CHAIN_ID = 815
 ALPEN_CHAIN_IDS = {ALPEN_TESTNET_CHAIN_ID, ALPEN_MAINNET_CHAIN_ID}
 ALPEN_TESTNET_GENESIS = "0x0102272379ba01273f82eb5ad1b00d2616458ad308efdfe4a6cc3012c9d3447a"
+STARKNET_GENESIS = "0x03237338cdabf1a819d469f497dcf4ee879a1eb4c5602a1fd84d78bcde090d33"
+KNOWN_STRATA_GENESIS_HASHES = {ALPEN_TESTNET_GENESIS, STARKNET_GENESIS}
 
 CHAIN_TYPE_NAMES = {
     EIP155_CHAIN_TYPE: "eip155",
@@ -196,6 +198,12 @@ STRATA_DECODE_VECTORS = [
         "0x0102272379ba01273f82eb5ad1b00d2616458ad308efdfe4a6cc3012c9d3447a",
         "0xd8da6bf26964af9d7eed9e03e53415d37aa96045",
     ),
+    (
+        "Starknet strata (32B addr)",
+        "0001ffff2003237338cdabf1a819d469f497dcf4ee879a1eb4c5602a1fd84d78bcde090d332004505a9f06f2bd639b6601f37a4dc0908bb70e8e0e0c34b1220827d64f4fc066",
+        "0x03237338cdabf1a819d469f497dcf4ee879a1eb4c5602a1fd84d78bcde090d33",
+        "0x04505a9f06f2bd639b6601f37a4dc0908bb70e8e0e0c34b1220827d64f4fc066",
+    ),
 ]
 
 ERROR_TEST_VECTORS = [
@@ -285,7 +293,7 @@ def main():
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="Only accept known Alpen chain identities",
+        help="Only accept known chain identities (Alpen eip155 or known strata genesis hashes)",
     )
     parser.add_argument(
         "--test",
@@ -312,10 +320,9 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
-        if result["namespace"] == "strata" and result.get("genesis_hash") != ALPEN_TESTNET_GENESIS:
+        if result["namespace"] == "strata" and result.get("genesis_hash") not in KNOWN_STRATA_GENESIS_HASHES:
             print(
-                f"Error: genesis hash {result.get('genesis_hash')} does not match "
-                f"known Alpen testnet genesis",
+                f"Error: genesis hash {result.get('genesis_hash')} is not a known strata chain",
                 file=sys.stderr,
             )
             sys.exit(1)

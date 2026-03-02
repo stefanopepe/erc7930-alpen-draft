@@ -25,12 +25,15 @@ ERC7930_VERSION = 0x0001
 EIP155_CHAIN_TYPE = 0x0000
 STRATA_CHAIN_TYPE = 0xFFFF  # placeholder until CASA assigns an official value
 EVM_ADDRESS_LENGTH = 20  # bytes
+STARKNET_ADDRESS_LENGTH = 32  # bytes (felt252)
 GENESIS_HASH_LENGTH = 32  # bytes
 
 ALPEN_TESTNET_CHAIN_ID = 8150
 ALPEN_MAINNET_CHAIN_ID = 815
 ALPEN_COINBASE = "0x5400000000000000000000000000000000000011"  # standard Alpen coinbase
 ALPEN_TESTNET_GENESIS = "0x0102272379ba01273f82eb5ad1b00d2616458ad308efdfe4a6cc3012c9d3447a"
+STARKNET_GENESIS = "0x03237338cdabf1a819d469f497dcf4ee879a1eb4c5602a1fd84d78bcde090d33"
+STARKNET_SAMPLE_ADDRESS = "0x04505a9f06f2bd639b6601f37a4dc0908bb70e8e0e0c34b1220827d64f4fc066"
 
 
 # ── Core functions ───────────────────────────────────────────────────────────
@@ -55,14 +58,19 @@ def chain_id_to_ref_bytes(chain_id: int) -> bytes:
     return chain_id.to_bytes(byte_length, byteorder="big")
 
 
-def validate_address(address: str) -> bytes:
-    """Parse a 0x-prefixed EVM hex address and return raw 20 bytes."""
+def validate_address(address: str, expected_length: int = EVM_ADDRESS_LENGTH) -> bytes:
+    """Parse a 0x-prefixed hex address and return raw bytes.
+
+    Args:
+        address: 0x-prefixed hex string.
+        expected_length: Expected byte length (20 for EVM, 32 for Starknet).
+    """
     if not address.startswith("0x") and not address.startswith("0X"):
         raise ValueError(f"Address must start with 0x, got: {address[:6]}...")
     hex_part = address[2:]
-    if len(hex_part) != EVM_ADDRESS_LENGTH * 2:
+    if len(hex_part) != expected_length * 2:
         raise ValueError(
-            f"Address must be {EVM_ADDRESS_LENGTH * 2} hex chars, got {len(hex_part)}"
+            f"Address must be {expected_length * 2} hex chars, got {len(hex_part)}"
         )
     try:
         return bytes.fromhex(hex_part)
@@ -188,19 +196,28 @@ ALPEN_EIP155_VECTORS = [
     ),
 ]
 
-# strata vectors: (description, genesis_hash_hex, address_hex, expected_erc7930_hex)
-ALPEN_STRATA_VECTORS = [
+# strata vectors: (description, genesis_hash_hex, address_hex, addr_length, expected_erc7930_hex)
+STRATA_VECTORS = [
     (
-        "Alpen testnet strata — coinbase",
+        "Alpen testnet strata — coinbase (20B addr)",
         ALPEN_TESTNET_GENESIS,
         ALPEN_COINBASE,
+        EVM_ADDRESS_LENGTH,
         "0001ffff200102272379ba01273f82eb5ad1b00d2616458ad308efdfe4a6cc3012c9d3447a145400000000000000000000000000000000000011",
     ),
     (
-        "Alpen testnet strata — vitalik address",
+        "Alpen testnet strata — vitalik (20B addr)",
         ALPEN_TESTNET_GENESIS,
         "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+        EVM_ADDRESS_LENGTH,
         "0001ffff200102272379ba01273f82eb5ad1b00d2616458ad308efdfe4a6cc3012c9d3447a14d8da6bf26964af9d7eed9e03e53415d37aa96045",
+    ),
+    (
+        "Starknet strata (32B addr)",
+        STARKNET_GENESIS,
+        STARKNET_SAMPLE_ADDRESS,
+        STARKNET_ADDRESS_LENGTH,
+        "0001ffff2003237338cdabf1a819d469f497dcf4ee879a1eb4c5602a1fd84d78bcde090d332004505a9f06f2bd639b6601f37a4dc0908bb70e8e0e0c34b1220827d64f4fc066",
     ),
 ]
 
@@ -238,9 +255,9 @@ def run_tests() -> bool:
 
     # strata encode tests
     print("\nstrata encode tests:")
-    for desc, genesis_hex, addr_hex, expected_hex in ALPEN_STRATA_VECTORS:
+    for desc, genesis_hex, addr_hex, addr_len, expected_hex in STRATA_VECTORS:
         expected = expected_hex.replace(" ", "").lower()
-        addr_bytes = validate_address(addr_hex)
+        addr_bytes = validate_address(addr_hex, expected_length=addr_len)
         genesis_bytes = validate_genesis_hash(genesis_hex)
         result = encode_erc7930(addr_bytes, namespace="strata", genesis_hash_bytes=genesis_bytes).hex()
 
@@ -272,7 +289,13 @@ def main():
     parser.add_argument(
         "--address",
         type=str,
-        help="EVM address (0x-prefixed, 40 hex chars; default: Alpen coinbase)",
+        help="Address (0x-prefixed; 40 hex for EVM, 64 hex for Starknet; default: Alpen coinbase)",
+    )
+    parser.add_argument(
+        "--address-length",
+        type=int,
+        default=None,
+        help="Address byte length — strata only (default: auto-detect from --address)",
     )
     parser.add_argument(
         "--chain-id",
@@ -301,7 +324,15 @@ def main():
     if not args.address:
         args.address = ALPEN_COINBASE
 
-    address_bytes = validate_address(args.address)
+    # Determine expected address length
+    if args.address_length is not None:
+        addr_len = args.address_length
+    else:
+        # Auto-detect from hex length
+        hex_len = len(args.address.removeprefix("0x").removeprefix("0X"))
+        addr_len = hex_len // 2
+
+    address_bytes = validate_address(args.address, expected_length=addr_len)
 
     if args.namespace == "eip155":
         erc7930 = encode_erc7930(address_bytes, namespace="eip155", chain_id=args.chain_id)
